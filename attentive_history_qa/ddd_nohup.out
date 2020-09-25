@@ -1,0 +1,42 @@
+/home/user/miniconda/envs/py36/lib/python3.6/importlib/_bootstrap.py:219: RuntimeWarning: numpy.dtype size changed, may indicate binary incompatibility. Expected 96, got 88
+  return f(*args, **kwds)
+/home/user/miniconda/envs/py36/lib/python3.6/importlib/_bootstrap.py:219: RuntimeWarning: numpy.dtype size changed, may indicate binary incompatibility. Expected 96, got 88
+  return f(*args, **kwds)
+key:  yesno_model/kernel
+(768, 3)
+key:  yesno_model/bias
+(3,)
+key:  history_attention_model/kernel
+(768, 1)
+key:  history_attention_model/bias/adam_v
+(1,)
+key:  history_attention_model/bias/adam_m
+(1,)
+key:  global_step
+()
+key:  followup_model/bias
+(3,)
+key:  cls/cqa/output_bias/adam_v
+(2,)
+key:  cls/cqa/output_bias/adam_m
+(2,)
+key:  cls/cqa/aux_output_weights
+(2, 768)
+key:  followup_model/kernel
+(768, 3)
+key:  cls/cqa/aux_output_bias
+(2,)
+key:  cls/cqa/output_weights/adam_m
+(2, 768)
+key:  history_attention_model/bias
+(1,)
+key:  cls/cqa/output_weights/adam_v
+(2, 768)
+key:  history_attention_model/kernel/adam_m
+(768, 1)
+key:  cls/cqa/output_bias
+(2,)
+key:  cls/cqa/output_weights
+(2, 768)
+key:  history_attention_model/kernel/adam_v
+(768, 1)
