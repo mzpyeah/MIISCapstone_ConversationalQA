@@ -34,10 +34,7 @@ class CoQAEvaluator():
             id_to_source[story_id] = source
             questions = story['questions']
             multiple_answers = [story['answers']]
-            try:
-                multiple_answers += story['additional_answers'].values()
-            except:
-                pass
+            multiple_answers += story['additional_answers'].values()
             for i, qa in enumerate(questions):
                 qid = qa['turn_id']
                 if i + 1 != qid:
