@@ -1,1 +1,4 @@
 BERT/
+BertFlowDelta/output_quac/
+BertFlowDelta/QuAC_data/
+BertFlowDelta/CoQA_data/
