@@ -1096,7 +1096,6 @@ class FlowRNN(nn.Module):
                 if self.flowdelta_step:
                     cur_input = torch.cat((residual, cur_input), dim=2)
                 
-                self.rnns[i].flatten_parameters()
                 rnn_output, h = self.rnns[i](cur_input, hidden)
 
                 if hidden is not None:
