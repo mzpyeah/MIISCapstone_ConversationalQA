@@ -178,7 +178,6 @@ class BertEmbeddings(nn.Module):
         self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size)
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
-
         #self.context_feature_embeddings = nn.Linear(config.hidden_size + prv_ctx * 2, config.hidden_size)
         self.context_feature_embeddings = nn.Linear(prv_ctx * 2, config.hidden_size)
         # self.LayerNorm is not snake-cased to stick with TensorFlow model variable name and be able to load
@@ -841,10 +840,10 @@ class BertForQuestionAnsweringExtend(PreTrainedBertModel):
     def __init__(self, config, class_num, prv_ctx):
         super(BertForQuestionAnsweringExtend, self).__init__(config)
         self.class_num = class_num
-        self.bert = BertModel(config, prv_ctx=prv_ctx)
+        self.bert = BertModel(config, prv_ctx=prv_ctx, use_flow=False)
         # TODO check with Google if it's normal there is no dropout on the token classifier of SQuAD in the TF version
         # self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.flow = FlowRNN(config.hidden_size, config.hidden_size, num_layers=1, rnn_type=nn.GRU, bidir=False,
+        self.flow = FlowRNN(config.hidden_size, config.hidden_size, num_layers=2, rnn_type=nn.GRU, bidir=False,
                             residual_step=True)
         self.pool = nn.Linear(config.hidden_size * 2, config.hidden_size * 2)
         self.tanh = nn.Tanh()
@@ -1095,7 +1094,7 @@ class FlowRNN(nn.Module):
             
                 if self.flowdelta_step:
                     cur_input = torch.cat((residual, cur_input), dim=2)
-                
+
                 rnn_output, h = self.rnns[i](cur_input, hidden)
 
                 if hidden is not None:

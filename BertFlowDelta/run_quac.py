@@ -34,10 +34,11 @@ import torch
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 
-from pytorch_pretrained_bert.tokenization import whitespace_tokenize, BasicTokenizer, BertTokenizer
-from pytorch_pretrained_bert.modeling import BertForQuestionAnswering
+from pytorch_pretrained_bert.tokenization import whitespace_tokenize, BasicTokenizer
+from transformers import RobertaTokenizer
+from pytorch_pretrained_roberta.modeling import RobertaForQuestionAnswering
 from pytorch_pretrained_bert.optimization import BertAdam
-from pytorch_pretrained_bert.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
+from transformers.file_utils import TRANSFORMERS_CACHE
 from utils import dev_evaluate, write_quac, quac_performance
 
 logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
@@ -217,8 +218,7 @@ def read_quac_examples(input_file, is_training, max_question_len=60):
     return examples
 
 
-def convert_examples_to_features(examples, tokenizer, max_seq_length,
-                                 doc_stride, max_query_length, is_training):
+def convert_examples_to_features(examples, tokenizer, max_seq_length, doc_stride, max_query_length, is_training):
     """Loads a data file into a list of `InputBatch`s."""
 
     unique_id = 1000000000
@@ -383,8 +383,7 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
     return features
 
 
-def _improve_answer_span(doc_tokens, input_start, input_end, tokenizer,
-                         orig_answer_text):
+def _improve_answer_span(doc_tokens, input_start, input_end, tokenizer, orig_answer_text):
     """Returns tokenized answer spans that better match the annotated answer."""
 
     # The SQuAD annotations are character based. We first project them to
@@ -460,10 +459,7 @@ RawResult = collections.namedtuple("RawResult",
                                    ["unique_id", "start_logits", "end_logits", "class_logits"])
 
 
-def write_predictions(all_examples, all_features, all_results, n_best_size,
-                      max_answer_length, do_lower_case, output_prediction_file,
-                      output_nbest_file, output_null_log_odds_file, verbose_logging, 
-                      is_version2, null_score_diff_threshold, ignore_write=True):
+def write_predictions(all_examples, all_features, all_results, n_best_size, max_answer_length, do_lower_case, output_prediction_file, output_nbest_file, output_null_log_odds_file, verbose_logging, is_version2, null_score_diff_threshold, ignore_write=True):
     """Write final predictions to the json file and log-odds of null if needed."""
     logger.info("Writing predictions to: %s" % (output_prediction_file))
     logger.info("Writing nbest to: %s" % (output_nbest_file))
@@ -1060,7 +1056,7 @@ def main():
     #    raise ValueError("Output directory () already exists and is not empty.")
     os.makedirs(args.output_dir, exist_ok=True)
 
-    tokenizer = BertTokenizer.from_pretrained(args.bert_model)
+    tokenizer = RobertaTokenizer.from_pretrained(args.bert_model)
 
     train_examples = None
     num_train_steps = None
@@ -1071,8 +1067,8 @@ def main():
             len(train_examples) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
 
     # Prepare model
-    model = BertForQuestionAnswering.from_pretrained(args.bert_model,
-                cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / 'distributed_{}'.format(args.local_rank),
+    model = RobertaForQuestionAnswering.from_pretrained(args.bert_model,
+                cache_dir=TRANSFORMERS_CACHE + '/distributed_{}'.format(args.local_rank),
                 class_num=1, use_flow=args.use_flow)
 
     if args.fp16:
@@ -1176,7 +1172,12 @@ def main():
             segment_ids = segment_ids.to(device)
             context_feature = context_feature.to(device)
             with torch.no_grad():
-                batch_start_logits, batch_end_logits, batch_class_logits = model(input_ids, segment_ids, input_mask, context_feature)
+                batch_start_logits, batch_end_logits, batch_class_logits = model(
+                    input_ids=input_ids,
+                    attention_mask=input_mask,
+                    # token_type_ids=segment_ids,
+                    context_feature=context_feature
+                )
             for i, example_index in enumerate(example_indices):
                 start_logits = batch_start_logits[i].detach().cpu().tolist()
                 end_logits = batch_end_logits[i].detach().cpu().tolist()
@@ -1241,8 +1242,15 @@ def main():
                 if n_gpu == 1:
                     batch = tuple(t.to(device) for t in batch) # multi-gpu does scattering it-self
                 input_ids, input_mask, segment_ids, context_feature, start_positions, end_positions, is_impossible = batch
-    
-                loss = model(input_ids, segment_ids, input_mask, context_feature, start_positions, end_positions, is_impossible)
+                loss = model(
+                    input_ids=input_ids,
+                    attention_mask=input_mask,
+                    # token_type_ids=segment_ids,
+                    start_positions=start_positions,
+                    end_positions=end_positions,
+                    context_feature=context_feature,
+                    is_impossible=is_impossible
+                )
                 if n_gpu > 1:
                     loss = loss.mean() # mean() to average on multi-gpu.
                 if args.gradient_accumulation_steps > 1:
@@ -1288,9 +1296,8 @@ def main():
 
     # Load a trained model that you have fine-tuned
     model_state_dict = torch.load(output_model_file)
-    model = BertForQuestionAnswering.from_pretrained(args.bert_model, state_dict=model_state_dict,
-    cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / 'distributed_{}'.format(args.local_rank),
-    class_num=1, use_flow=args.use_flow)
+    model = RobertaForQuestionAnswering.from_pretrained(args.bert_model, state_dict=model_state_dict,
+    cache_dir=TRANSFORMERS_CACHE + '/distributed_{}'.format(args.local_rank), class_num=1, use_flow=args.use_flow)
     model.to(device)
 
     if args.do_predict and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
@@ -1324,7 +1331,12 @@ def main():
             segment_ids = segment_ids.to(device)
             context_feature = context_feature.to(device)
             with torch.no_grad():
-                batch_start_logits, batch_end_logits, batch_class_logits = model(input_ids, segment_ids, input_mask, context_feature)
+                batch_start_logits, batch_end_logits, batch_class_logits = model(
+                    input_ids=input_ids,
+                    # token_type_ids=segment_ids,
+                    attention_mask=input_mask,
+                    context_feature=context_feature
+                )
             for i, example_index in enumerate(example_indices):
                 start_logits = batch_start_logits[i].detach().cpu().tolist()
                 end_logits = batch_end_logits[i].detach().cpu().tolist()
