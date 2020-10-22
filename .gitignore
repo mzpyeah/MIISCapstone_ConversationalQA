@@ -1,7 +1,6 @@
 BERT/
 BertFlowDelta/output_quac/
 BertFlowDelta/QuAC_data/
-BertFlowDelta/CoQA_data/
 BertFlowDelta/__pycache__/
 BertFlowDelta/pytorch_pretrained_bert/__pycache__/
 BertFlowDelta/pytorch_pretrained_roberta/__pycache__/
