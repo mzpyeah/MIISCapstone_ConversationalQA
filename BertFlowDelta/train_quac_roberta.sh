@@ -1,4 +1,4 @@
-python3 run_quac.py \
+python3 run_quac_roberta.py \
   --bert_model roberta-base \
   --do_train \
   --do_predict \
@@ -15,4 +15,3 @@ python3 run_quac.py \
   --log_freq 1000 \
   # --no_flow
   # --no_cuda
-# --bert_model bert-base-uncased
