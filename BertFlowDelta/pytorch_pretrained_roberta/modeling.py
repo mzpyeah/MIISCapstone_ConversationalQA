@@ -212,12 +212,17 @@ class RobertaEmbeddings(nn.Module):
     """
 
     # Copied from transformers.modeling_bert.BertEmbeddings.__init__
-    def __init__(self, config, prv_ctx=2):
+    def __init__(self, config, prv_ctx=2, cat_context=False):
         super().__init__()
         self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
-        self.context_feature_embeddings = nn.Linear(prv_ctx * 2, config.hidden_size)
+        if cat_context:
+            self.context_length = 128
+            self.context_feature_embeddings = nn.Linear(prv_ctx * 2, self.context_length)
+            self.context_reducer = nn.Linear(self.context_length + config.hidden_size, config.hidden_size)
+        else:
+            self.context_feature_embeddings = nn.Linear(prv_ctx * 2, config.hidden_size)
         # self.LayerNorm is not snake-cased to stick with TensorFlow model variable name and be able to load
         # any TensorFlow checkpoint file
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -262,7 +267,11 @@ class RobertaEmbeddings(nn.Module):
 
         if context_feature is not None:
             context_feature = self.context_feature_embeddings(context_feature)
-            embeddings = inputs_embeds + position_embeddings + token_type_embeddings + context_feature
+            if cat_context:
+                embeddings = torch.cat(((inputs_embeds + position_embeddings + token_type_embeddings), context_feature), -1)
+                embeddings = self.context_reducer(embeddings)
+            else:
+                embeddings = inputs_embeds + position_embeddings + token_type_embeddings + context_feature
         else:
             embeddings = inputs_embeds + position_embeddings + token_type_embeddings
         embeddings = self.LayerNorm(embeddings)
