@@ -13,5 +13,5 @@ python3 run_quac_roberta.py \
   --doc_stride 128 \
   --output_dir output_quac/ \
   --log_freq 1000 \
-  # --no_flow
+  --no_flow
   # --no_cuda
