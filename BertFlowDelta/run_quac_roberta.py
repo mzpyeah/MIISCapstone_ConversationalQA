@@ -27,9 +27,6 @@ import math
 import os
 import random
 import pickle
-import regex as re
-from collections import Counter
-import string
 from tqdm import tqdm, trange
 
 import numpy as np
@@ -37,100 +34,20 @@ import torch
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 
-from pytorch_pretrained_bert.tokenization import whitespace_tokenize, BasicTokenizer, BertTokenizer
-from pytorch_pretrained_bert.modeling import BertForQuestionAnswering
+from pytorch_pretrained_bert.tokenization import whitespace_tokenize, BasicTokenizer
+from transformers import RobertaTokenizer
+from pytorch_pretrained_roberta.modeling import RobertaForQuestionAnswering
 from pytorch_pretrained_bert.optimization import BertAdam
-from pytorch_pretrained_bert.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
-from utils import dev_evaluate, write_coqa, coqa_performance
+from transformers.file_utils import TRANSFORMERS_CACHE
+from utils import dev_evaluate, write_quac, quac_performance
 
 logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt = '%m/%d/%Y %H:%M:%S',
                     level = logging.INFO)
 logger = logging.getLogger(__name__)
 
-def normalize_answer(s):
-    """Lower text and remove punctuation, articles and extra whitespace."""
-    def remove_articles(text):
-        return re.sub(r'\b(a|an|the)\b', ' ', text)
 
-    def white_space_fix(text):
-        return ' '.join(text.split())
-
-    def remove_punc(text):
-        exclude = set(string.punctuation)
-        return ''.join(ch for ch in text if ch not in exclude)
-
-    def lower(text):
-        return text.lower()
-
-    return white_space_fix(remove_articles(remove_punc(lower(s))))
-
-def len_preserved_normalize_answer(s):
-    """Lower text and remove punctuation, articles and extra whitespace."""
-
-    def len_preserved_space(matchobj):
-        return ' ' * len(matchobj.group(0))
-
-    def remove_articles(text):
-        return re.sub(r'\b(a|an|the)\b', len_preserved_space, text)
-
-    def remove_punc(text):
-        exclude = set(string.punctuation)
-        return ''.join(ch if ch not in exclude else " " for ch in text)
-
-    def lower(text):
-        return text.lower()
-
-    return remove_articles(remove_punc(lower(s)))
-
-def split_with_span(s):
-    if s.split() == []:
-        return [], []
-    else:
-        return zip(*[(m.group(0), (m.start(), m.end()-1)) for m in re.finditer(r'\S+', s)])
-
-def free_text_to_span(free_text, full_text):
-    if free_text == "unknown":
-        return "__NA__", -1, -1
-    if normalize_answer(free_text) == "yes":
-        return "__YES__", -1, -1
-    if normalize_answer(free_text) == "no":
-        return "__NO__", -1, -1
-
-    free_ls = len_preserved_normalize_answer(free_text).split()
-    full_ls, full_span = split_with_span(len_preserved_normalize_answer(full_text))
-    if full_ls == []:
-        return full_text, 0, len(full_text)
-
-    max_f1, best_index = 0.0, (0, len(full_ls)-1)
-    free_cnt = Counter(free_ls)
-    for i in range(len(full_ls)):
-        full_cnt = Counter()
-        for j in range(len(full_ls)):
-            if i+j >= len(full_ls): break
-            full_cnt[full_ls[i+j]] += 1
-
-            common = free_cnt & full_cnt
-            num_same = sum(common.values())
-            if num_same == 0: continue
-
-            precision = 1.0 * num_same / (j + 1)
-            recall = 1.0 * num_same / len(free_ls)
-            f1 = (2 * precision * recall) / (precision + recall)
-
-            if max_f1 < f1:
-                max_f1 = f1
-                best_index = (i, j)
-
-    assert(best_index is not None)
-    (best_i, best_j) = best_index
-    char_i, char_j = full_span[best_i][0], full_span[best_i+best_j][1]+1
-
-    return full_text[char_i:char_j], char_i, char_j
-    
-
-
-class CoQAExample(object):
+class QuACExample(object):
     """
     A single training/test example for the QuAC dataset.
     For examples without an answer, the start and end position are -1.
@@ -143,7 +60,7 @@ class CoQAExample(object):
                  orig_answer_text=None,
                  start_position=None,
                  end_position=None,
-                 ans_choice=None,
+                 is_impossible=None,
                  dialog_id=None):
         self.qas_id = qas_id
         self.question_text = question_text
@@ -151,7 +68,7 @@ class CoQAExample(object):
         self.orig_answer_text = orig_answer_text
         self.start_position = start_position
         self.end_position = end_position
-        self.ans_choice = ans_choice
+        self.is_impossible = is_impossible
         self.dialog_id = dialog_id
 
     def __str__(self):
@@ -168,7 +85,7 @@ class CoQAExample(object):
         if self.start_position:
             s += ", end_position: %d" % (self.end_position)
         if self.start_position:
-            s += ", ans_choice: %r" % (self.ans_choice)
+            s += ", is_impossible: %r" % (self.is_impossible)
         return s
 
 class InputFeatures(object):
@@ -186,7 +103,7 @@ class InputFeatures(object):
                  segment_ids,
                  start_position=None,
                  end_position=None,
-                 ans_choice=None,
+                 is_impossible=None,
                  dialog_id=None):
         self.unique_id = unique_id
         self.example_index = example_index
@@ -199,118 +116,109 @@ class InputFeatures(object):
         self.segment_ids = segment_ids
         self.start_position = start_position
         self.end_position = end_position
-        self.ans_choice = ans_choice
+        self.is_impossible = is_impossible
         self.dialog_id = dialog_id
 
-def read_coqa_examples(input_file, is_training, max_question_len=60):
+def read_quac_examples(input_file, is_training, max_question_len=60):
     """Read a QuAC json file into a list of QuACExample."""
     with open(input_file, "r", encoding='utf-8') as reader:
         source = json.load(reader)
         input_data = source["data"]
 
     def is_whitespace(c):
-        if c == " " or c == "\t" or c == "\r" or c == "\n" or ord(c) == 0x202F or c == '\xa0':
+        if c == " " or c == "\t" or c == "\r" or c == "\n" or ord(c) == 0x202F:
             return True
         return False
 
     examples = []
     dialog_id = 0
-    for paragraph in input_data:
-        paragraph_text = paragraph["story"]
-        doc_tokens = []
-        char_to_word_offset = []
-        prev_is_whitespace = True
-        for c in paragraph_text:
-            if is_whitespace(c):
-                prev_is_whitespace = True
-            else:
-                if prev_is_whitespace:
-                    doc_tokens.append(c)
+    for entry in input_data:
+        for paragraph in entry["paragraphs"]:
+            paragraph_text = paragraph["context"]
+            doc_tokens = []
+            char_to_word_offset = []
+            prev_is_whitespace = True
+            for c in paragraph_text:
+                if is_whitespace(c):
+                    prev_is_whitespace = True
                 else:
-                    doc_tokens[-1] += c
-                prev_is_whitespace = False
-            char_to_word_offset.append(len(doc_tokens) - 1)
+                    if prev_is_whitespace:
+                        doc_tokens.append(c)
+                    else:
+                        doc_tokens[-1] += c
+                    prev_is_whitespace = False
+                char_to_word_offset.append(len(doc_tokens) - 1)
 
-        for qa_idx, q in enumerate(paragraph["questions"]):
-            qas_id = paragraph['id'] + '#' + str(q["turn_id"])
-            if qa_idx > 0:
-                question_text = '{}<q>{}<a>{}'.format(paragraph['questions'][qa_idx - 1]['input_text'],
-                                                    paragraph['answers'][qa_idx - 1]['input_text'],
-                                                    q['input_text'])
-            else:
-                question_text = q["input_text"]
-            '''elif qa_idx > 1:
-                question_text = '{}<q>{}<a>{}<q>{}<a>{}'.format(
-                                                    paragraph['questions'][qa_idx - 2]['input_text'],
-                                                    paragraph['answers'][qa_idx - 2]['input_text'],
-                                                    paragraph['questions'][qa_idx - 1]['input_text'],
-                                                    paragraph['answers'][qa_idx - 1]['input_text'],
-                                                    q['input_text'])
-            '''
-            q_tokens = question_text.split()
-            if len(q_tokens) > max_question_len:
-                print('exceed max query', question_text)
-                question_text = ' '.join(q_tokens[-max_question_len:])
-            else:
-                for _ in range(max_question_len - len(q_tokens)):
-                    question_text = question_text + ' _'
-            assert len(question_text.split()) == max_question_len
+            for qa_idx, qa in enumerate(paragraph["qas"]):
+                qas_id = qa["id"]
+                if qa_idx > 0:
+                    # '{} {} / {}'
+                    question_text = '{}<q>{}<a>{}'.format(paragraph['qas'][qa_idx - 1]['question'],
+                                                      paragraph['qas'][qa_idx - 1]['orig_answer']['text'],
+                                                      qa['question'])
+                else:
+                    question_text = qa["question"]
 
-            start_position = None
-            end_position = None
-            orig_answer_text = None
-            if is_training:
-                answer_text = paragraph['answers'][qa_idx]['input_text']
-                span_text = paragraph['answers'][qa_idx]['span_text']
-                orig_answer_text, char_i, char_j  = free_text_to_span(answer_text, span_text)
+                q_tokens = question_text.split()
+                if len(q_tokens) > max_question_len:
+                    logger.info('exceed max query before token')
+                    question_text = ' '.join(q_tokens[-max_question_len:])
+                else:
+                    for _ in range(max_question_len - len(q_tokens)):
+                        question_text = question_text + ' _'
+                assert len(question_text.split()) == max_question_len
                 
-                ans_choice = 0 if orig_answer_text == '__NA__' else\
-                             1 if orig_answer_text == '__YES__' else\
-                             2 if orig_answer_text == '__NO__' else\
-                             3 # Not a yes/no question
+                start_position = None
+                end_position = None
+                orig_answer_text = None
+                is_impossible = False
+                if is_training:
+                    answer_text = qa['orig_answer']['text']
+                    is_impossible = 1 if answer_text == 'CANNOTANSWER' else 0
+                    
+                    #if (len(qa["answers"]) != 1) and (not is_impossible):
+                    #    raise ValueError(
+                    #        "For training, each question should have exactly 1 answer.")
+                    if not is_impossible:
+                        answer = qa["answers"][0]
+                        orig_answer_text = answer["text"]
+                        answer_offset = answer["answer_start"]
+                        answer_length = len(orig_answer_text)
+                        start_position = char_to_word_offset[answer_offset]
+                        end_position = char_to_word_offset[answer_offset + answer_length - 1]
+                        # Only add answers where the text can be exactly recovered from the
+                        # document. If this CAN'T happen it's likely due to weird Unicode
+                        # stuff so we will just skip the example.
+                        #
+                        # Note that this means for training mode, every example is NOT
+                        # guaranteed to be preserved.
+                        actual_text = " ".join(doc_tokens[start_position:(end_position + 1)])
+                        cleaned_answer_text = " ".join(
+                            whitespace_tokenize(orig_answer_text))
+                        if actual_text.find(cleaned_answer_text) == -1:
+                            logger.warning("Could not find answer: '%s' vs. '%s'",
+                                            actual_text, cleaned_answer_text)
+                            continue
+                    else: 
+                        start_position = -1
+                        end_position = -1
+                        orig_answer_text = ""
 
-                #if (len(qa["answers"]) != 1) and (not is_impossible):
-                #    raise ValueError(
-                #        "For training, each question should have exactly 1 answer.")
-                if ans_choice == 3:
-                    answer_offset = paragraph['answers'][qa_idx]['span_start'] + char_i
-                    answer_length = len(orig_answer_text)
-                    start_position = char_to_word_offset[answer_offset]
-                    end_position = char_to_word_offset[answer_offset + answer_length - 1]
-                    # Only add answers where the text can be exactly recovered from the
-                    # document. If this CAN'T happen it's likely due to weird Unicode
-                    # stuff so we will just skip the example.
-                    #
-                    # Note that this means for training mode, every example is NOT
-                    # guaranteed to be preserved.
-                    actual_text = " ".join(doc_tokens[start_position:(end_position + 1)])
-                    cleaned_answer_text = " ".join(
-                        whitespace_tokenize(orig_answer_text))
-                    if actual_text.find(cleaned_answer_text) == -1:
-                        print(whitespace_tokenize(orig_answer_text), doc_tokens[start_position: (end_position+1)])
-                        logger.warning("Could not find answer: '%s' vs. '%s'",
-                                        actual_text, cleaned_answer_text)
-                        continue
-                else:
-                    start_position = -1
-                    end_position = -1
-                    orig_answer_text = ""
-            example = CoQAExample(
-                qas_id=qas_id,
-                question_text=question_text,
-                doc_tokens=doc_tokens,
-                orig_answer_text=orig_answer_text,
-                start_position=start_position,
-                end_position=end_position,
-                ans_choice=ans_choice,
-                dialog_id=dialog_id)
-            examples.append(example)
-        dialog_id += 1
+                example = QuACExample(
+                    qas_id=qas_id,
+                    question_text=question_text,
+                    doc_tokens=doc_tokens,
+                    orig_answer_text=orig_answer_text,
+                    start_position=start_position,
+                    end_position=end_position,
+                    is_impossible=is_impossible,
+                    dialog_id=dialog_id)
+                examples.append(example)
+            dialog_id += 1
     return examples
 
 
-def convert_examples_to_features(examples, tokenizer, max_seq_length,
-                                 doc_stride, max_query_length, is_training):
+def convert_examples_to_features(examples, tokenizer, max_seq_length, doc_stride, max_query_length, is_training):
     """Loads a data file into a list of `InputBatch`s."""
 
     unique_id = 1000000000
@@ -334,10 +242,10 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
 
         tok_start_position = None
         tok_end_position = None
-        if is_training and example.ans_choice != 3:
+        if is_training and example.is_impossible:
             tok_start_position = -1
             tok_end_position = -1
-        if is_training and example.ans_choice == 3:
+        if is_training and not example.is_impossible:
             tok_start_position = orig_to_tok_index[example.start_position]
             if example.end_position < len(example.doc_tokens) - 1:
                 tok_end_position = orig_to_tok_index[example.end_position + 1] - 1
@@ -373,12 +281,8 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
             segment_ids = []
             tokens.append("[CLS]")
             segment_ids.append(0)
-            
-            q_pad_start = -1
-            for idx, token in enumerate(query_tokens):
+            for token in query_tokens:
                 tokens.append(token)
-                if token == '_' and q_pad_start == -1:
-                    q_pad_start = idx
                 segment_ids.append(0)
             tokens.append("[SEP]")
             segment_ids.append(0)
@@ -407,24 +311,20 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
                 input_mask.append(0)
                 segment_ids.append(0)
 
-            # make question padding be 0
-            for idx in range(q_pad_start, len(query_tokens)):
-                input_ids[idx] = 0
-                input_mask[idx] = 0
-
             assert len(input_ids) == max_seq_length
             assert len(input_mask) == max_seq_length
             assert len(segment_ids) == max_seq_length
 
             start_position = None
             end_position = None
-            if is_training and example.ans_choice == 3:
+            if is_training and not example.is_impossible:
                 # For training, if our document chunk does not contain an annotation
                 # we throw it out, since there is nothing to predict.
                 doc_start = doc_span.start
                 doc_end = doc_span.start + doc_span.length - 1
                 out_of_span = False 
-                if not (tok_start_position >= doc_start and tok_end_position <= doc_end):
+                if not (tok_start_position >= doc_start and 
+                        tok_end_position <= doc_end):
                     out_of_span = True
                 if out_of_span:
                     start_position = 0
@@ -434,7 +334,7 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
                     start_position = tok_start_position - doc_start + doc_offset
                     end_position = tok_end_position - doc_start + doc_offset
 
-            if is_training and example.ans_choice != 3:
+            if is_training and example.is_impossible:
                 start_position = 0
                 end_position = 0
 
@@ -454,15 +354,15 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
                     "input_mask: %s" % " ".join([str(x) for x in input_mask]))
                 logger.info(
                     "segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
-                if is_training and example.ans_choice != 3:
+                if is_training and example.is_impossible:
                     logger.info("impossible example")   
-                if is_training and example.ans_choice == 3:
+                if is_training and not example.is_impossible:
                     answer_text = " ".join(tokens[start_position:(end_position + 1)])
                     logger.info("start_position: %d" % (start_position))
                     logger.info("end_position: %d" % (end_position))
                     logger.info(
                         "answer: %s" % (answer_text))
-
+            
             features.append(
                 InputFeatures(
                     unique_id=unique_id,
@@ -476,15 +376,14 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
                     segment_ids=segment_ids,
                     start_position=start_position,
                     end_position=end_position,
-                    ans_choice=example.ans_choice,
+                    is_impossible=example.is_impossible,
                     dialog_id=example.dialog_id))
             unique_id += 1
 
     return features
 
 
-def _improve_answer_span(doc_tokens, input_start, input_end, tokenizer,
-                         orig_answer_text):
+def _improve_answer_span(doc_tokens, input_start, input_end, tokenizer, orig_answer_text):
     """Returns tokenized answer spans that better match the annotated answer."""
 
     # The SQuAD annotations are character based. We first project them to
@@ -560,10 +459,7 @@ RawResult = collections.namedtuple("RawResult",
                                    ["unique_id", "start_logits", "end_logits", "class_logits"])
 
 
-def write_predictions(all_examples, all_features, all_results, n_best_size,
-                      max_answer_length, do_lower_case, output_prediction_file,
-                      output_nbest_file, output_null_log_odds_file, verbose_logging, is_version2, null_score_diff_threshold,
-                      ignore_write):
+def write_predictions(all_examples, all_features, all_results, n_best_size, max_answer_length, do_lower_case, output_prediction_file, output_nbest_file, output_null_log_odds_file, verbose_logging, is_version2, null_score_diff_threshold, ignore_write=True):
     """Write final predictions to the json file and log-odds of null if needed."""
     logger.info("Writing predictions to: %s" % (output_prediction_file))
     logger.info("Writing nbest to: %s" % (output_nbest_file))
@@ -583,6 +479,7 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
     all_predictions = collections.OrderedDict()
     all_nbest_json = collections.OrderedDict()
     scores_diff_json = collections.OrderedDict()
+    class_score_json = collections.OrderedDict()
 
     for (example_index, example) in enumerate(all_examples):
         features = example_index_to_features[example_index]
@@ -637,7 +534,6 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
                             end_logit=result.end_logits[end_index],
                             class_logit=result.class_logits))
 
-
         prelim_predictions.append(
             _PrelimPrediction(
                 feature_index=min_null_feature_index,
@@ -682,13 +578,7 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
                     continue
                 seen_predictions[final_text] = True
             else:
-                pred_choice = np.argmax(pred.class_logit)
-                if pred_choice == 0:
-                    final_text = 'Unknown'
-                elif pred_choice == 1:
-                    final_text = 'Yes'
-                else:
-                    final_text = 'No'
+                final_text = 'CANNOTANSWER'
                 seen_predictions[final_text] = True
 
             nbest.append(
@@ -698,24 +588,17 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
                     end_logit=pred.end_logit))
 
         # if we didn't inlude the empty option in the n-best, inlcude it
-        if "Unknown" not in seen_predictions and 'Yes' not in seen_predictions and 'No' not in seen_predictions:
-            choice = np.argmax(null_class_logit)
-            if choice == 0:
-                final_text = 'Unknown'
-            elif choice == 1:
-                final_text = 'Yes'
-            else:
-                final_text = 'No'
+        if "CANNOTANSWER" not in seen_predictions:
             nbest.append(
                 _NbestPrediction(
-                    text=final_text, start_logit=null_start_logit,
+                    text="CANNOTANSWER", start_logit=null_start_logit,
                     end_logit=null_end_logit))
 
         # In very rare edge cases we could have no valid predictions. So we
         # just create a nonce prediction in this case to avoid failure.
         if not nbest:
             nbest.append(
-                _NbestPrediction(text="empty", start_logit=-100.0, end_logit=-100.0))
+                _NbestPrediction(text="CANNOTANSWER", start_logit=0.0, end_logit=0.0))
 
         assert len(nbest) >= 1
         total_scores = []
@@ -723,7 +606,7 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
         for entry in nbest:
             total_scores.append(entry.start_logit + entry.end_logit)
             if not best_non_null_entry:
-                if entry.text not in ['Unknown', 'Yes', 'No']:
+                if entry.text not in ['CANNOTANSWER']:
                     best_non_null_entry = entry
         
         probs = _compute_softmax(total_scores)
@@ -738,26 +621,19 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
             nbest_json.append(output)
 
         assert len(nbest_json) >= 1
+
         if not best_non_null_entry:
             score_diff = 10
         else:
             # predict "" iff the null score - the score of best non-null > threshold
             score_diff = score_null - best_non_null_entry.start_logit - (
                 best_non_null_entry.end_logit)
+        scores_diff_json[example.qas_id] = score_diff
         if score_diff > null_score_diff_threshold:
-            choice = np.argmax(null_class_logit)
-            if choice == 0:
-                final_text = 'Unknown'
-            elif choice == 1:
-                final_text = 'Yes'
-            else:
-                final_text = 'No' 
-            
-            all_predictions[example.qas_id] = final_text
+            all_predictions[example.qas_id] = "CANNOTANSWER"
         else:
             all_predictions[example.qas_id] = best_non_null_entry.text
         all_nbest_json[example.qas_id] = nbest_json
-        scores_diff_json[example.qas_id] = (score_diff, final_text, all_predictions[example.qas_id])
 
     if not ignore_write:
         with open(output_prediction_file, "w") as writer:
@@ -765,10 +641,12 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
 
         with open(output_nbest_file, "w") as writer:
             writer.write(json.dumps(all_nbest_json, indent=4) + "\n")
-    
-        with open(output_null_log_odds_file, "w") as writer:
-            writer.write(json.dumps(scores_diff_json, indent=4) + "\n")
+        
+        if is_version2:
+            with open(output_null_log_odds_file, "w") as writer:
+                writer.write(json.dumps(scores_diff_json, indent=4) + "\n")
     return all_predictions, all_nbest_json
+
 
 def get_final_text(pred_text, orig_text, do_lower_case, verbose_logging=False):
     """Project the tokenized prediction back to the original text."""
@@ -912,7 +790,7 @@ class DialogDataLoader:
                  segment_ids, 
                  start_positions, 
                  end_positions, 
-                 ans_choices, 
+                 is_impossibles, 
                  example_indexs,
                  eval_mode=False,
                  prv_ctx=2):
@@ -921,27 +799,29 @@ class DialogDataLoader:
         self.segment_ids = segment_ids
         self.start_positions = start_positions
         self.end_positions = end_positions
-        self.ans_choices = ans_choices
+        self.is_impossibles = is_impossibles
         self.example_indexs = example_indexs
         self.eval = eval_mode
         self.prv_ctx = prv_ctx
-
-        self.max_batch = 12 if not self.eval else 100
-        # beacause we limit the max number of dialog
-        num_examples = 0
+        
+        # TODO: change max_batch into argument
+        self.max_batch = 12 if not self.eval else 100 # control how many qa pairs in one batch
+        
+        num_examples = 0 # count how many batches in the data (for optimimzer learning rate schedule)
         for idx in range(len(self.input_ids)):
             all_input_ids = torch.tensor(self.input_ids[idx], dtype=torch.long)
             dialog_len = all_input_ids.size(0)
-
             for i in range(0, dialog_len, self.max_batch):
                 num_examples += 1
         self.num_examples = num_examples
-
     
     def __len__(self):
         return self.num_examples
     
-    def gen_context_feature(self, input_ids, start_positions, end_positions, ans_choices):
+    def gen_context_feature(self, input_ids, start_positions, end_positions, is_impossibles):
+        '''
+        Generate feature about "is this context word a answer in last dialog turns?"
+        '''
         context_feature = torch.zeros((input_ids.size(0), input_ids.size(1), 2 * self.prv_ctx), dtype=torch.float)
         # start/end_position: (batch, 1)
         for b_idx in range(start_positions.size(0)):
@@ -952,19 +832,18 @@ class DialogDataLoader:
                 continue
             end = min(input_ids.size(1) - 1, end)
             
-            ans_choice = ans_choices[b_idx].item()
+            impossible = is_impossibles[b_idx].item()
             
-            if ans_choice == 3 and start != 0 and end != 0: # there is an answer
+            if not impossible and start != 0 and end != 0: # there is an answer
                 for c_idx in range(self.prv_ctx): 
                     if b_idx + c_idx + 1 >= input_ids.size(0):
                         break
                     for d_idx in range(start, end+1):
                         context_feature[b_idx + c_idx + 1, d_idx, c_idx * 2 + 0] = 1
-            elif ans_choice != 3:
+            elif impossible:
                 for c_idx in range(self.prv_ctx):
                     if b_idx + c_idx + 1 >= input_ids.size(0):
                         break
-                    #context_feature[b_idx + c_idx + 1, :, c_idx * 2 + 1] = ans_choice + 1
                     context_feature[b_idx + c_idx + 1, :, c_idx * 2 + 1] = 1
             # the else case means there is invalid sample
         return context_feature
@@ -980,65 +859,66 @@ class DialogDataLoader:
             all_segment_ids = torch.tensor(self.segment_ids[idx], dtype=torch.long)
             all_start_positions = torch.tensor(self.start_positions[idx], dtype=torch.long)
             all_end_positions = torch.tensor(self.end_positions[idx], dtype=torch.long)
-            all_ans_choices = torch.tensor(self.ans_choices[idx], dtype=torch.long)
+            all_is_impossibles = torch.tensor(self.is_impossibles[idx], dtype=torch.long)
             all_example_indexs = torch.tensor(self.example_indexs[idx], dtype=torch.long)
                
-            all_context_feature = self.gen_context_feature(all_input_ids, all_start_positions, all_end_positions, all_ans_choices)
+            all_context_feature = self.gen_context_feature(all_input_ids, all_start_positions, all_end_positions, all_is_impossibles)
 
+            max_batch = self.max_batch
             dialog_len = all_input_ids.size(0)
 
-            dialog_step = self.max_batch
-            
-            for i in range(0, dialog_len, dialog_step):
-                start, end = i, i + dialog_step
-                input_ids = all_input_ids[start:end, :]
-                input_mask = all_input_mask[start:end, :]
-                segment_ids = all_segment_ids[start:end, :]
-                context_feature = all_context_feature[start:end, :]
-                start_positions = all_start_positions[start:end]
-                end_positions = all_end_positions[start:end]
-                ans_choices = all_ans_choices[start:end]
-                example_indexs = all_example_indexs[start:end]
+            for i in range(0, dialog_len, max_batch):
+                input_ids = all_input_ids[i:i + max_batch, :]
+                input_mask = all_input_mask[i:i + max_batch, :]
+                segment_ids = all_segment_ids[i:i + max_batch, :]
+                context_feature = all_context_feature[i:i + max_batch, :]
+                start_positions = all_start_positions[i:i + max_batch]
+                end_positions = all_end_positions[i:i + max_batch]
+                is_impossibles = all_is_impossibles[i:i + max_batch]
+                example_indexs = all_example_indexs[i:i + max_batch]
                 if self.eval:
                     yield input_ids, input_mask, segment_ids, context_feature, example_indexs
                 else:
-                    yield input_ids, input_mask, segment_ids, context_feature, start_positions, end_positions, ans_choices
+                    yield input_ids, input_mask, segment_ids, context_feature, start_positions, end_positions, is_impossibles
 
 
-def make_dialog_tensors(features, is_eval=False, prv_ctx=2):
+def make_dialog_tensors(features, is_eval=False):
+    '''
+    Collect Q/A pairs in same dialog together for batching.
+    '''
     all_input_ids = []
     all_input_mask = []
     all_segment_ids = []
     all_start_positions = []
     all_end_positions = []
-    all_ans_choices = []
+    all_is_impossibles = []
     all_input_ids = []
     all_example_indexs = []
-    input_ids, input_mask, segment_ids, start_positions, end_positions, ans_choices = [], [], [], [], [], []
-    example_indexs = []
+    input_ids, input_mask, segment_ids, start_positions, end_positions, is_impossibles = [], [], [], [], [], []
+    example_indexs = [] # for original pytorch_pretrained_bert prediction implementation
 
     example_index = np.arange(len(features))
     
     last_dialog_id = None
     for f_idx, f in enumerate(features):
-        if last_dialog_id is None or f.dialog_id != last_dialog_id:
+        if last_dialog_id is None or f.dialog_id != last_dialog_id: # different dialog
             if last_dialog_id is not None:
                 all_input_ids.append(input_ids)
                 all_input_mask.append(input_mask)
                 all_segment_ids.append(segment_ids)
                 all_start_positions.append(start_positions)
                 all_end_positions.append(end_positions)
-                all_ans_choices.append(ans_choices)
+                all_is_impossibles.append(is_impossibles)
                 
                 all_example_indexs.append(example_indexs)
-            input_ids, input_mask, segment_ids, start_positions, end_positions, ans_choices = [], [], [], [], [], []
+            input_ids, input_mask, segment_ids, start_positions, end_positions, is_impossibles = [], [], [], [], [], []
             example_indexs = []
         input_ids.append(f.input_ids)
         input_mask.append(f.input_mask)
         segment_ids.append(f.segment_ids)
         start_positions.append(f.start_position)
         end_positions.append(f.end_position)
-        ans_choices.append(int(f.ans_choice))
+        is_impossibles.append(int(f.is_impossible))
         
         example_indexs.append(example_index[f_idx])
         
@@ -1049,13 +929,13 @@ def make_dialog_tensors(features, is_eval=False, prv_ctx=2):
     all_segment_ids.append(segment_ids)
     all_start_positions.append(start_positions)
     all_end_positions.append(end_positions)
-    all_ans_choices.append(ans_choices)
+    all_is_impossibles.append(is_impossibles)
     
     all_example_indexs.append(example_indexs)
 
     train_data = DialogDataLoader(all_input_ids, all_input_mask, all_segment_ids,
                                all_start_positions, all_end_positions, 
-                               all_ans_choices, all_example_indexs, eval_mode=is_eval, prv_ctx=prv_ctx)
+                               all_is_impossibles, all_example_indexs, eval_mode=is_eval)
     return train_data
 
 def main():
@@ -1067,6 +947,7 @@ def main():
                              "bert-large-uncased, bert-base-cased, bert-base-multilingual, bert-base-chinese.")
     parser.add_argument("--output_dir", default=None, type=str, required=True,
                         help="The output directory where the model checkpoints and predictions will be written.")
+
     ## Other parameters
     parser.add_argument("--train_file", default=None, type=str, help="SQuAD json for training. E.g., train-v1.1.json")
     parser.add_argument("--predict_file", '-i', default=None, type=str,
@@ -1130,9 +1011,9 @@ def main():
     parser.add_argument('--null_score_diff_threshold',
                         type=float, default=0.0,
                         help="If null_score - best_non_null is greater than the threshold predict null.")
-    parser.add_argument('--log_freq', type=int, default=1000, help='frequecy to print training process')    
+    parser.add_argument('--log_freq', type=int, default=10, help='frequecy to print training process')   
     parser.add_argument('--no_flow', action='store_false', dest='use_flow')
-    parser.add_argument('--prv_ctx', type=int, default=2)
+
     args = parser.parse_args()
 
     if args.local_rank == -1 or args.no_cuda:
@@ -1175,20 +1056,20 @@ def main():
     #    raise ValueError("Output directory () already exists and is not empty.")
     os.makedirs(args.output_dir, exist_ok=True)
 
-    tokenizer = BertTokenizer.from_pretrained(args.bert_model)
+    tokenizer = RobertaTokenizer.from_pretrained(args.bert_model)
 
     train_examples = None
     num_train_steps = None
     if args.do_train:
-        train_examples = read_coqa_examples(
+        train_examples = read_quac_examples(
             input_file=args.train_file, is_training=True)
         num_train_steps = int(
             len(train_examples) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
 
     # Prepare model
-    model = BertForQuestionAnswering.from_pretrained(args.bert_model,
-                cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / 'distributed_{}'.format(args.local_rank),
-                class_num=3, prv_ctx=args.prv_ctx, use_flow=args.use_flow)
+    model = RobertaForQuestionAnswering.from_pretrained(args.bert_model,
+                cache_dir=TRANSFORMERS_CACHE + '/distributed_{}'.format(args.local_rank),
+                class_num=1, use_flow=args.use_flow)
 
     if args.fp16:
         model.half()
@@ -1241,12 +1122,12 @@ def main():
                              t_total=t_total)
 
     global_step = 0
-    
+
     if args.do_train:
         # prepare eval data
-        eval_examples = read_coqa_examples(
-            input_file=args.predict_file, is_training=True)
-
+        eval_examples = read_quac_examples(
+                input_file=args.predict_file, is_training=True)
+        
         cached_dev_features_file = args.predict_file+'_{0}_{1}_{2}_{3}'.format(
             args.bert_model, str(args.max_seq_length), str(args.doc_stride), str(args.max_query_length))
         try:
@@ -1256,7 +1137,7 @@ def main():
             eval_features = convert_examples_to_features(
                 examples=eval_examples,
                 tokenizer=tokenizer,
-                max_seq_length=512,
+                max_seq_length=args.max_seq_length,
                 doc_stride=args.doc_stride,
                 max_query_length=args.max_query_length,
                 is_training=True)
@@ -1265,12 +1146,20 @@ def main():
                 with open(cached_dev_features_file, "wb") as writer:
                     pickle.dump(eval_features, writer)
 
-        eval_dataloader = make_dialog_tensors(eval_features, is_eval=True, prv_ctx=args.prv_ctx)
+        eval_dataloader = make_dialog_tensors(eval_features, is_eval=True)
 
-        from CoQA_eval import CoQAEvaluator
-        evaluator = CoQAEvaluator(args.predict_file)
+        target = json.load(open(args.predict_file))['data']
+        target_dict = {}
+        for p in target:
+            for par in p['paragraphs']:
+                p_id = par['id']
+                qa_list = par['qas']
+                for qa in qa_list:
+                    q_idx = qa['id']
+                    val_spans = [anss['text'] for anss in qa['answers']]
+                    target_dict[q_idx] = val_spans
 
-    
+
     def run_dev(model, eval_dataloader, evaluator):
         model.eval()
         all_results = []
@@ -1283,11 +1172,16 @@ def main():
             segment_ids = segment_ids.to(device)
             context_feature = context_feature.to(device)
             with torch.no_grad():
-                batch_start_logits, batch_end_logits, batch_class_logits = model(input_ids, segment_ids, input_mask, context_feature)
+                batch_start_logits, batch_end_logits, batch_class_logits = model(
+                    input_ids=input_ids,
+                    attention_mask=input_mask,
+                    # token_type_ids=segment_ids,
+                    context_feature=context_feature
+                )
             for i, example_index in enumerate(example_indices):
                 start_logits = batch_start_logits[i].detach().cpu().tolist()
                 end_logits = batch_end_logits[i].detach().cpu().tolist()
-                class_logits = batch_class_logits[i].detach().cpu().tolist()
+                class_logits = batch_class_logits[i].detach().cpu().tolist()[0]
 
                 eval_feature = eval_features[example_index.item()]
                 unique_id = int(eval_feature.unique_id)
@@ -1298,12 +1192,12 @@ def main():
         pred, nbest_pred = write_predictions(eval_examples, eval_features, all_results,
                                              args.n_best_size, args.max_answer_length,
                                              args.do_lower_case, None,
-                                             None, None, args.verbose_logging, True, 0.0,
-                                             ignore_write=True)
-        f1 = coqa_performance(pred, nbest_pred, evaluator)
+                                             None, None, 
+                                             args.verbose_logging, True, args.null_score_diff_threshold, ignore_write=True)
+        f1 = quac_performance(pred, nbest_pred, evaluator)
         return f1
 
-    best_f1 = 0
+
     if args.do_train:
         cached_train_features_file = args.train_file+'_{0}_{1}_{2}_{3}'.format(
             args.bert_model, str(args.max_seq_length), str(args.doc_stride), str(args.max_query_length))
@@ -1328,8 +1222,8 @@ def main():
         logger.info("  Num split examples = %d", len(train_features))
         logger.info("  Batch size = %d", args.train_batch_size)
         logger.info("  Num steps = %d", num_train_steps)
-        
-        train_dataloader = make_dialog_tensors(train_features, prv_ctx=args.prv_ctx)
+
+        train_dataloader = make_dialog_tensors(train_features)
 
         t_total = int(
         len(train_dataloader) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
@@ -1339,14 +1233,24 @@ def main():
                              warmup=args.warmup_proportion,
                              t_total=t_total)
  
+        # make sure the functionality 
+
+        best_f1 = 0
         for _ in trange(int(args.num_train_epochs), desc="Epoch"):
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
                 model.train()
                 if n_gpu == 1:
                     batch = tuple(t.to(device) for t in batch) # multi-gpu does scattering it-self
-                input_ids, input_mask, segment_ids, context_feature, start_positions, end_positions, ans_choice = batch
-
-                loss = model(input_ids, segment_ids, input_mask, context_feature, start_positions, end_positions, ans_choice)
+                input_ids, input_mask, segment_ids, context_feature, start_positions, end_positions, is_impossible = batch
+                loss = model(
+                    input_ids=input_ids,
+                    attention_mask=input_mask,
+                    # token_type_ids=segment_ids,
+                    start_positions=start_positions,
+                    end_positions=end_positions,
+                    context_feature=context_feature,
+                    is_impossible=is_impossible
+                )
                 if n_gpu > 1:
                     loss = loss.mean() # mean() to average on multi-gpu.
                 if args.gradient_accumulation_steps > 1:
@@ -1368,7 +1272,7 @@ def main():
                     tqdm.write('Step: {} | train loss: {}'.format(step, loss.item()))
                 
                 if step % 10000 == 0:
-                    f1 = run_dev(model, eval_dataloader, evaluator)
+                    f1 = run_dev(model, eval_dataloader, target_dict)
                     if f1 >= best_f1:
                         best_f1 = f1
                         # do save model
@@ -1378,45 +1282,43 @@ def main():
                     logger.info('F1: {} (best: {}) Step: {}'.format(f1, best_f1, step))
 
 
+
     # Save a trained model
     model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
     output_model_file = os.path.join(args.output_dir, "pytorch_model.bin")
     if args.do_train:
-        f1 = run_dev(model, eval_dataloader, evaluator)
+        f1 = run_dev(model, eval_dataloader, target_dict)
         if f1 >= best_f1:
             best_f1 = f1
             # do save model
-            model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
-            output_model_file = os.path.join(args.output_dir, "pytorch_model.bin")
             torch.save(model_to_save.state_dict(), output_model_file)
         logger.info('F1: {} (best: {}) Step: {}'.format(f1, best_f1, step))
 
-        #torch.save(model_to_save.state_dict(), output_model_file)
-
     # Load a trained model that you have fine-tuned
     model_state_dict = torch.load(output_model_file)
-    model = BertForQuestionAnswering.from_pretrained(args.bert_model, state_dict=model_state_dict,
-    cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / 'distributed_{}'.format(args.local_rank),
-    class_num=3, prv_ctx=args.prv_ctx, use_flow=args.use_flow)
+    model = RobertaForQuestionAnswering.from_pretrained(args.bert_model, state_dict=model_state_dict,
+    cache_dir=TRANSFORMERS_CACHE + '/distributed_{}'.format(args.local_rank), class_num=1, use_flow=args.use_flow)
     model.to(device)
 
     if args.do_predict and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
-        eval_examples = read_coqa_examples(
-            input_file=args.predict_file, is_training=True)
+        # prepare eval data
+        eval_examples = read_quac_examples(
+                input_file=args.predict_file, is_training=True)
         eval_features = convert_examples_to_features(
-            examples=eval_examples,
-            tokenizer=tokenizer,
-            max_seq_length=args.max_seq_length,
-            doc_stride=args.doc_stride,
-            max_query_length=args.max_query_length,
-            is_training=True)
+                examples=eval_examples,
+                tokenizer=tokenizer,
+                max_seq_length=args.max_seq_length,
+                doc_stride=args.doc_stride,
+                max_query_length=args.max_query_length,
+                is_training=True)
+        eval_dataloader = make_dialog_tensors(eval_features, is_eval=True)
 
         logger.info("***** Running predictions *****")
         logger.info("  Num orig examples = %d", len(eval_examples))
         logger.info("  Num split examples = %d", len(eval_features))
         logger.info("  Batch size = %d", args.predict_batch_size)
 
-        eval_dataloader = make_dialog_tensors(eval_features, is_eval=True, prv_ctx=args.prv_ctx)
+        eval_dataloader = make_dialog_tensors(eval_features, is_eval=True)
 
         model.eval()
         all_results = []
@@ -1429,11 +1331,16 @@ def main():
             segment_ids = segment_ids.to(device)
             context_feature = context_feature.to(device)
             with torch.no_grad():
-                batch_start_logits, batch_end_logits, batch_class_logits = model(input_ids, segment_ids, input_mask, context_feature)
+                batch_start_logits, batch_end_logits, batch_class_logits = model(
+                    input_ids=input_ids,
+                    # token_type_ids=segment_ids,
+                    attention_mask=input_mask,
+                    context_feature=context_feature
+                )
             for i, example_index in enumerate(example_indices):
                 start_logits = batch_start_logits[i].detach().cpu().tolist()
                 end_logits = batch_end_logits[i].detach().cpu().tolist()
-                class_logits = batch_class_logits[i].detach().cpu().tolist()
+                class_logits = batch_class_logits[i].detach().cpu().tolist()[0]
 
                 eval_feature = eval_features[example_index.item()]
                 unique_id = int(eval_feature.unique_id)
@@ -1448,11 +1355,13 @@ def main():
         pred, nbest_pred = write_predictions(eval_examples, eval_features, all_results,
                                              args.n_best_size, args.max_answer_length,
                                              args.do_lower_case, output_prediction_file,
-                                             output_nbest_file, output_null_log_odds_file, args.verbose_logging, True, 0.0,
-                                             ignore_write)
+                                             output_nbest_file, output_null_log_odds_file, 
+                                             args.verbose_logging, True, args.null_score_diff_threshold, ignore_write=ignore_write)
         if args.output_file is not None:
-            write_coqa(pred, nbest_pred, args.predict_file, args.output_file)
+            # we hand craft the thrshold
+            write_quac(pred, nbest_pred, args.predict_file, args.output_file)
 
+            
 
 if __name__ == "__main__":
     main()
