@@ -1,4 +1,4 @@
-python3 -u run_quac_roberta.py \
+python3 -u run_quac_roberta_rerun.py \
   --bert_model roberta-base \
   --do_train \
   --do_predict \
