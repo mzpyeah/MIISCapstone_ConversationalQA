@@ -61,7 +61,8 @@ class QuACExample(object):
                  start_position=None,
                  end_position=None,
                  is_impossible=None,
-                 dialog_id=None):
+                 dialog_id=None,
+                 commonsense=None):
         self.qas_id = qas_id
         self.question_text = question_text
         self.doc_tokens = doc_tokens
@@ -70,6 +71,7 @@ class QuACExample(object):
         self.end_position = end_position
         self.is_impossible = is_impossible
         self.dialog_id = dialog_id
+        self.commonsense=commonsense
 
     def __str__(self):
         return self.__repr__()
@@ -204,6 +206,10 @@ def read_quac_examples(input_file, is_training, max_question_len=60):
                         end_position = -1
                         orig_answer_text = ""
 
+                cs = None
+                if "commonsense" in qa:
+                    cs = qa["commonsense"]
+
                 example = QuACExample(
                     qas_id=qas_id,
                     question_text=question_text,
@@ -212,16 +218,19 @@ def read_quac_examples(input_file, is_training, max_question_len=60):
                     start_position=start_position,
                     end_position=end_position,
                     is_impossible=is_impossible,
-                    dialog_id=dialog_id)
+                    dialog_id=dialog_id,
+                    commonsense=cs)
                 examples.append(example)
             dialog_id += 1
     return examples
 
 
-def convert_examples_to_features(examples, tokenizer, max_seq_length, doc_stride, max_query_length, is_training):
+def convert_examples_to_features(examples, tokenizer, max_seq_length, doc_stride, max_query_length, is_training, use_commonsense):
     """Loads a data file into a list of `InputBatch`s."""
 
     unique_id = 1000000000
+    cs_max_len = 10
+    cs_max_path_len = 8
 
     features = []
     for (example_index, example) in enumerate(examples):
@@ -229,6 +238,18 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, doc_stride
 
         if len(query_tokens) > max_query_length:
             query_tokens = query_tokens[0:max_query_length]
+
+        if use_commonsense:
+            commonsense = example.commonsense
+            if len(commonsense) > cs_max_len:
+                commonsense = commonsense[:cs_max_len]
+            for idx in range(len(commonsense)):
+                if len(commonsense[idx]) > cs_max_path_len:
+                    commonsense[idx] = commonsense[idx][:cs_max_path_len]
+            cs = []
+            for c in commonsense:
+                cs += c
+                cs.append(" ")
 
         tok_to_orig_index = []
         orig_to_tok_index = []
@@ -255,8 +276,10 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, doc_stride
                 all_doc_tokens, tok_start_position, tok_end_position, tokenizer,
                 example.orig_answer_text)
 
-        # The -3 accounts for [CLS], [SEP] and [SEP]
+        # The -3 accounts for [CLS], [SEP], and [SEP]
         max_tokens_for_doc = max_seq_length - len(query_tokens) - 3
+        if use_commonsense:
+            max_tokens_for_doc = max_tokens_for_doc - len(cs) - 1
 
         # We can have documents that are longer than the maximum sequence length.
         # To deal with this we do a sliding window approach, where we take chunks
@@ -298,6 +321,13 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length, doc_stride
                 segment_ids.append(1)
             tokens.append("[SEP]")
             segment_ids.append(1)
+
+            if use_commonsense:
+                for token in cs:
+                    tokens.append(token)
+                    segment_ids.append(1)
+                tokens.append("[SEP]")
+                segment_ids.append(1)
 
             input_ids = tokenizer.convert_tokens_to_ids(tokens)
 
@@ -1013,6 +1043,7 @@ def main():
                         help="If null_score - best_non_null is greater than the threshold predict null.")
     parser.add_argument('--log_freq', type=int, default=10, help='frequecy to print training process')   
     parser.add_argument('--no_flow', action='store_false', dest='use_flow')
+    parser.add_argument('--no_commonsense', action='store_false', dest='use_commonsense')
 
     args = parser.parse_args()
 
@@ -1130,6 +1161,8 @@ def main():
         
         cached_dev_features_file = args.predict_file+'_{0}_{1}_{2}_{3}'.format(
             args.bert_model, str(args.max_seq_length), str(args.doc_stride), str(args.max_query_length))
+        if args.use_commonsense:
+            cached_dev_features_file += "_cs"
         try:
             with open(cached_dev_features_file, "rb") as reader:
                 eval_features = pickle.load(reader)
@@ -1140,7 +1173,8 @@ def main():
                 max_seq_length=args.max_seq_length,
                 doc_stride=args.doc_stride,
                 max_query_length=args.max_query_length,
-                is_training=True)
+                is_training=True,
+                use_commonsense=args.use_commonsense)
             if args.local_rank == -1 or torch.distributed.get_rank() == 0:
                 logger.info("  Saving dev features into cached file %s", cached_dev_features_file)
                 with open(cached_dev_features_file, "wb") as writer:
@@ -1201,6 +1235,8 @@ def main():
     if args.do_train:
         cached_train_features_file = args.train_file+'_{0}_{1}_{2}_{3}'.format(
             args.bert_model, str(args.max_seq_length), str(args.doc_stride), str(args.max_query_length))
+        if args.use_commonsense:
+            cached_train_features_file += '_cs'
         train_features = None
         try:
             with open(cached_train_features_file, "rb") as reader:
@@ -1212,7 +1248,8 @@ def main():
                 max_seq_length=args.max_seq_length,
                 doc_stride=args.doc_stride,
                 max_query_length=args.max_query_length,
-                is_training=True)
+                is_training=True,
+                use_commonsense=args.use_commonsense)
             if args.local_rank == -1 or torch.distributed.get_rank() == 0:
                 logger.info("  Saving train features into cached file %s", cached_train_features_file)
                 with open(cached_train_features_file, "wb") as writer:
@@ -1236,6 +1273,7 @@ def main():
         # make sure the functionality 
 
         best_f1 = 0
+        ct = 0
         for _ in trange(int(args.num_train_epochs), desc="Epoch"):
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
                 model.train()
@@ -1279,9 +1317,54 @@ def main():
                         model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
                         output_model_file = os.path.join(args.output_dir, "pytorch_model.bin")
                         torch.save(model_to_save.state_dict(), output_model_file)
-                    logger.info('F1: {} (best: {}) Step: {}'.format(f1, best_f1, step))
+                        logger.info('F1: {} (best: {}) Step: {}'.format(f1, best_f1, step))
 
+                        logger.info("***** Running predictions *****")
+                        logger.info("  Num orig examples = %d", len(eval_examples))
+                        logger.info("  Num split examples = %d", len(eval_features))
+                        logger.info("  Batch size = %d", args.predict_batch_size)
 
+                        model.eval()
+                        all_results = []
+                        logger.info("Start evaluating")
+                        for input_ids, input_mask, segment_ids, context_feature, example_indices in tqdm(eval_dataloader, desc="Evaluating"):
+                            if len(all_results) % 1000 == 0:
+                                logger.info("Processing example: %d" % (len(all_results)))
+                            input_ids = input_ids.to(device)
+                            input_mask = input_mask.to(device)
+                            segment_ids = segment_ids.to(device)
+                            context_feature = context_feature.to(device)
+                            with torch.no_grad():
+                                batch_start_logits, batch_end_logits, batch_class_logits = model(
+                                    input_ids=input_ids,
+                                    # token_type_ids=segment_ids,
+                                    attention_mask=input_mask,
+                                    context_feature=context_feature
+                                )
+                            for i, example_index in enumerate(example_indices):
+                                start_logits = batch_start_logits[i].detach().cpu().tolist()
+                                end_logits = batch_end_logits[i].detach().cpu().tolist()
+                                class_logits = batch_class_logits[i].detach().cpu().tolist()[0]
+
+                                eval_feature = eval_features[example_index.item()]
+                                unique_id = int(eval_feature.unique_id)
+                                all_results.append(RawResult(unique_id=unique_id,
+                                                             start_logits=start_logits,
+                                                             end_logits=end_logits,
+                                                             class_logits=class_logits))
+                        output_prediction_file = os.path.join(args.output_dir, "predictions_%d.json" % ct)
+                        output_nbest_file = os.path.join(args.output_dir, "nbest_predictions_%d.json" % ct)
+                        output_null_log_odds_file = os.path.join(args.output_dir, "null_odds_%d.json" % ct)
+                        ct += 1
+                        ignore_write = args.output_file is not None
+                        pred, nbest_pred = write_predictions(eval_examples, eval_features, all_results,
+                                                             args.n_best_size, args.max_answer_length,
+                                                             args.do_lower_case, output_prediction_file,
+                                                             output_nbest_file, output_null_log_odds_file, 
+                                                             args.verbose_logging, True, args.null_score_diff_threshold, ignore_write=ignore_write)
+                        if args.output_file is not None:
+                            # we hand craft the thrshold
+                            write_quac(pred, nbest_pred, args.predict_file, args.output_file)
 
     # Save a trained model
     model_to_save = model.module if hasattr(model, 'module') else model  # Only save the model it-self
@@ -1310,7 +1393,8 @@ def main():
                 max_seq_length=args.max_seq_length,
                 doc_stride=args.doc_stride,
                 max_query_length=args.max_query_length,
-                is_training=True)
+                is_training=True,
+                use_commonsense=args.use_commonsense)
         eval_dataloader = make_dialog_tensors(eval_features, is_eval=True)
 
         logger.info("***** Running predictions *****")
