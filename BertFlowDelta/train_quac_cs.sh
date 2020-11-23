@@ -14,6 +14,5 @@ python3 run_quac_roberta.py \
   --output_dir output_quac/ \
   --log_freq 1000 \
   --no_flow \
- # --no_cuda \
+# --no_cuda \
 # --bert_model bert-base-uncased
-# if commonsense: 512 -> 768 train/dev + _cs
