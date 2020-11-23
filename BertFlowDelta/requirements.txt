@@ -9,4 +9,4 @@ requests
 # Used for parsing
 regex
 # Transformers for RoBERTa
-transformers
+transformers==3.4.0
