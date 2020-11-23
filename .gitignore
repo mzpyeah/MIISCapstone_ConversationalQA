@@ -6,3 +6,4 @@ BertFlowDelta/pytorch_pretrained_bert/__pycache__/
 BertFlowDelta/pytorch_pretrained_roberta/__pycache__/
 BertFlowDelta/formatted_predictions.json
 BertFlowDelta/nohup.out
+BertFlowDelta/ConceptNet_data/cn_relations_orig.txt

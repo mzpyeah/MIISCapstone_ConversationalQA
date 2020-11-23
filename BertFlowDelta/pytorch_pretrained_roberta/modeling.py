@@ -217,6 +217,7 @@ class RobertaEmbeddings(nn.Module):
         self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
         self.token_type_embeddings = nn.Embedding(config.type_vocab_size, config.hidden_size)
+        self.cat_context = cat_context
         if cat_context:
             self.context_length = 128
             self.context_feature_embeddings = nn.Linear(prv_ctx * 2, self.context_length)
@@ -267,7 +268,7 @@ class RobertaEmbeddings(nn.Module):
 
         if context_feature is not None:
             context_feature = self.context_feature_embeddings(context_feature)
-            if cat_context:
+            if self.cat_context:
                 embeddings = torch.cat(((inputs_embeds + position_embeddings + token_type_embeddings), context_feature), -1)
                 embeddings = self.context_reducer(embeddings)
             else:
