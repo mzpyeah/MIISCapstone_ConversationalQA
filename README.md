@@ -1,6 +1,5 @@
 # MIISCapstone_ConversationalQA
-Baseline 1: #15 HAM (https://github.com/hsbEdin/attentive_history_qa)
 
-Baseline 2: #16 Bert-FlowDelta (https://github.com/MiuLab/FlowDelta)
-
-Baseline 3: #20 GraphFlow (http://github.com/hugochan/GraphFlow)
+Adapted from the baseline: Bert-FlowDelta (https://github.com/MiuLab/FlowDelta).
+Utilizing RoBERTa, history attention mechanism & external knowledge, our model has outperformed the baselines successfully.
+Please check the model folder for more infomation.
