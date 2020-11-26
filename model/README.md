@@ -2,7 +2,7 @@
 
 ## Setup
 
-Install all depedent python packages
+Install Python packages
 
 ```
 pip install -r requirements.txt
