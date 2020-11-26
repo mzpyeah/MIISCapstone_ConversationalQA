@@ -1,4 +1,4 @@
-# BERT-FlowDelta
+# Our model
 
 ## Setup
 
@@ -24,14 +24,8 @@ Then download the file from https://drive.google.com/file/d/14nb2lM_KrWReSHlEaXV
 ## Train
 
 ```
-sh train_quac.sh
+sh train_quac_[bert/roberta/cs].sh
 ```
 ## Test
 
-```
-sh test_quac.sh
-```
-
-please refer to our CodaLab submission pages for inference details and pretrained models
-
-[QuAC](https://worksheets.codalab.org/worksheets/0xacb00235ee6b42b3aa682c5d62204a81)
+Remove the --do_train flag in the corresponding .sh file.
