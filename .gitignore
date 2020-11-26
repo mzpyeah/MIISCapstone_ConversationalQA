@@ -1,9 +1,8 @@
-BERT/
-BertFlowDelta/output_quac/
-BertFlowDelta/QuAC_data/
-BertFlowDelta/__pycache__/
-BertFlowDelta/pytorch_pretrained_bert/__pycache__/
-BertFlowDelta/pytorch_pretrained_roberta/__pycache__/
-BertFlowDelta/formatted_predictions.json
-BertFlowDelta/nohup.out
-BertFlowDelta/ConceptNet_data/cn_relations_orig.txt
+model/output_quac/
+model/QuAC_data
+model/__pycache__/
+model/pytorch_pretrained_bert/__pycache__/
+model/pytorch_pretrained_roberta/__pycache__/
+model/formatted_predictions.json
+model/nohup.out
+model/ConceptNet_data/cn_relations_orig.txt
