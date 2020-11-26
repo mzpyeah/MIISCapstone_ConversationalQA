@@ -3,8 +3,8 @@ python3 run_quac_roberta.py \
   --do_train \
   --do_predict \
   --do_lower_case \
-  --train_file QuAC_data/train_cs.json \
-  --predict_file QuAC_data/dev_cs.json \
+  --train_file QuAC_data/train_cs_his.json \
+  --predict_file QuAC_data/dev_cs_his.json \
   --train_batch_size 1 \
   --learning_rate 3e-5 \
   --num_train_epochs 5 \
@@ -13,6 +13,5 @@ python3 run_quac_roberta.py \
   --doc_stride 128 \
   --output_dir output_quac/ \
   --log_freq 1000 \
-  --no_flow \
+# --no_flow \
 # --no_cuda \
-# --bert_model bert-base-uncased

@@ -2,7 +2,8 @@ import sys
 import json
 
 raw = sys.argv[1]
-res = open("formatted_predictions.json", "w")
+idx = sys.argv[2] if sys.argv[2] else ''
+res = open("formatted_predictions_%s.json" % idx, "w")
 with open(raw) as f:
     dic = eval(f.read())
     ids = set()

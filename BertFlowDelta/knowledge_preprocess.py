@@ -14,7 +14,7 @@ def read_data(quac):
         source = json.load(reader)
         return source
 
-def create_processed_dataset(quac):
+def create_processed_dataset(quac, with_history=False):
     relations = CG.get_relations(concept_net)
     orig_data = read_data(quac)
     data = orig_data['data']
@@ -23,19 +23,28 @@ def create_processed_dataset(quac):
         data_pt = data[i]['paragraphs'][0]
         qas = data_pt['qas']
         context = nltk.word_tokenize(data_pt['context'].lower())
+        qs = []
         for idx, qa in enumerate(qas):
             q = nltk.word_tokenize(qa['question'].lower())
-            subgraph = CG.build_trees(relations, q, stop_words, context)
-            selected_relations = sample_relations(subgraph, context)
+            if idx == 1:
+                temp_context = context + qs[-1]
+            elif idx >= 2:
+                temp_context = context + qs[-2] + qs[-1]
+            else:
+                temp_context = context
+            qs.append(q)
+            subgraph = CG.build_trees(relations, q, stop_words, temp_context)
+            selected_relations = sample_relations(subgraph, temp_context)
             orig_data['data'][i]['paragraphs'][0]['qas'][idx]['commonsense'] = selected_relations
     print("Done!")
     return orig_data
 
 if __name__ == "__main__":
+    with_history = True
     nltk.download('punkt')
-    train = create_processed_dataset(quac_train)
-    with open("QuAC_data/train_cs.json", "w") as f:
+    train = create_processed_dataset(quac_train, with_history)
+    with open("QuAC_data/train_cs_his.json", "w") as f:
         json.dump(train, f)
-    dev = create_processed_dataset(quac_dev)
-    with open("QuAC_data/dev_cs.json", "w") as f:
+    dev = create_processed_dataset(quac_dev, with_history)
+    with open("QuAC_data/dev_cs_his.json", "w") as f:
         json.dump(dev, f)
