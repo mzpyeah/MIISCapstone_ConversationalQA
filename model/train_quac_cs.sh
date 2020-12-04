@@ -13,5 +13,7 @@ python3 run_quac_roberta.py \
   --doc_stride 128 \
   --output_dir output_quac/ \
   --log_freq 1000 \
+  --commonsense_max_len 10 \
+  --commonsense_max_path_len 8
 # --no_flow \
 # --no_cuda \

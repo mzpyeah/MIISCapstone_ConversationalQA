@@ -3,6 +3,7 @@ from commonsense_utils.general import sample_relations
 from tqdm import tqdm
 import json
 import nltk
+import sys
 
 concept_net = "ConceptNet_data/cn_relations_orig.txt"
 quac_train = "QuAC_data/train.json"
@@ -14,7 +15,7 @@ def read_data(quac):
         source = json.load(reader)
         return source
 
-def create_processed_dataset(quac, with_history=False):
+def create_processed_dataset(quac, with_history=2):
     relations = CG.get_relations(concept_net)
     orig_data = read_data(quac)
     data = orig_data['data']
@@ -26,13 +27,11 @@ def create_processed_dataset(quac, with_history=False):
         qs = []
         for idx, qa in enumerate(qas):
             q = nltk.word_tokenize(qa['question'].lower())
-            if idx == 1:
-                temp_context = context + qs[-1]
-            elif idx >= 2:
-                temp_context = context + qs[-2] + qs[-1]
-            else:
-                temp_context = context
+            temp_context = context + [token for token in q for q in qs[::-1]]
             qs.append(q)
+            if len(qs) > with_history:
+                qs = qs[-with_history:]
+                assert len(qs) == with_history
             subgraph = CG.build_trees(relations, q, stop_words, temp_context)
             selected_relations = sample_relations(subgraph, temp_context)
             orig_data['data'][i]['paragraphs'][0]['qas'][idx]['commonsense'] = selected_relations
@@ -40,11 +39,11 @@ def create_processed_dataset(quac, with_history=False):
     return orig_data
 
 if __name__ == "__main__":
-    with_history = True
     nltk.download('punkt')
+    with_history = int(sys.argv[1])
     train = create_processed_dataset(quac_train, with_history)
-    with open("QuAC_data/train_cs_his.json", "w") as f:
+    with open("QuAC_data/train_cs_his%d.json" % with_history, "w") as f:
         json.dump(train, f)
     dev = create_processed_dataset(quac_dev, with_history)
-    with open("QuAC_data/dev_cs_his.json", "w") as f:
+    with open("QuAC_data/dev_cs_his%d.json" % with_history, "w") as f:
         json.dump(dev, f)
