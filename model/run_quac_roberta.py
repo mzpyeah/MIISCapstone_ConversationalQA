@@ -1394,8 +1394,8 @@ def main():
                                              end_logits=end_logits,
                                              class_logits=class_logits))
         output_prediction_file = os.path.join(args.output_dir, "predictions.json")
-        # output_nbest_file = os.path.join(args.output_dir, "nbest_predictions.json")
-        # output_null_log_odds_file = os.path.join(args.output_dir, "null_odds.json")
+        output_nbest_file = os.path.join(args.output_dir, "nbest_predictions.json")
+        output_null_log_odds_file = os.path.join(args.output_dir, "null_odds.json")
         ignore_write = args.output_file is not None
         pred, nbest_pred = write_predictions(eval_examples, eval_features, all_results,
                                              args.n_best_size, args.max_answer_length,
