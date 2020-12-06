@@ -2,7 +2,9 @@ import sys
 import json
 
 raw = sys.argv[1]
-idx = sys.argv[2] if len(sys.argv) >= 2 else ''
+idx = ''
+if len(sys.argv) > 2:
+    idx = sys.argv[2]
 res = open("formatted_predictions_%s.json" % idx, "w")
 with open(raw) as f:
     dic = eval(f.read())
